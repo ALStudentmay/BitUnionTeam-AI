@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import httpx
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse

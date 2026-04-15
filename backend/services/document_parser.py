@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -198,11 +200,18 @@ def _parse_unstructured(file_bytes: bytes, filename: str) -> str:
     try:
         from unstructured.partition.auto import partition
 
-        tmp_path = Path(f"/tmp/{filename}")
-        tmp_path.write_bytes(file_bytes)
+        suffix = Path(filename).suffix or ".bin"
+        fd, tmp_name = tempfile.mkstemp(suffix=suffix)
+        tmp_path = Path(tmp_name)
+        try:
+            os.write(fd, file_bytes)
+        finally:
+            os.close(fd)
 
-        elements = partition(filename=str(tmp_path))
-        tmp_path.unlink(missing_ok=True)
+        try:
+            elements = partition(filename=str(tmp_path))
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
         md_lines: list[str] = []
         for el in elements:

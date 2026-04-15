@@ -17,7 +17,7 @@ load_dotenv(BASE_DIR / "backend" / ".env")
 # Настраиваем Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",  # Быстрая и дешевая модель для генерации "мусора"
+    model_name="gemini-2.5-flash",  # Быстрая и дешевая модель для генерации "мусора"
     generation_config={"temperature": 0.8}
 )
 
@@ -99,11 +99,9 @@ async def main():
 
     print(f"✅ ТЗ успешно прочитано ({len(reference_markdown)} символов). Запускаем Gemini 1.5 Flash...\n")
     
-    tasks = []
     for file_key, (desc, instr) in PROFILES.items():
-        tasks.append(generate_bad_tz(reference_markdown, file_key, desc, instr))
-    
-    await asyncio.gather(*tasks)
+        await generate_bad_tz(reference_markdown, file_key, desc, instr)
+        await asyncio.sleep(2)
     
     print("\n🎉 Все тестовые ТЗ успешно сгенерированы! Проект готов к демо (Code Freeze).")
 

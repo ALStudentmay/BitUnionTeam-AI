@@ -1,11 +1,27 @@
 import React, { useCallback, useState, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { UploadCloud, FileText, Loader2, AlertCircle } from 'lucide-react';
-import { api } from '../api';
-import { TZAuditResult } from '../types';
+import { api, getAuthToken } from '../api';
+import type { AuditPayload } from '../types';
 
 interface UploadPageProps {
-  onScoreComplete: (result: TZAuditResult) => void;
+  onScoreComplete: (payload: AuditPayload) => void;
+}
+
+function formatApiError(detail: unknown): string {
+  if (detail == null) return '';
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as { msg: string }).msg);
+        }
+        return JSON.stringify(item);
+      })
+      .join('; ');
+  }
+  return String(detail);
 }
 
 export const UploadPage: React.FC<UploadPageProps> = ({ onScoreComplete }) => {
@@ -44,20 +60,35 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onScoreComplete }) => {
     setError(null);
 
     try {
-      // Шаг 1: Загрузка и парсинг
+      // Шаг 1: только загрузка и парсинг на бэкенде (LLM / API-ключи не используются)
       setProgressText(`Парсинг файла ${file.name}...`);
-      const parseData = await api.uploadFile(file);
+      let parseData;
+      try {
+        parseData = await api.uploadFile(file);
+      } catch (err: unknown) {
+        const ax = err as { response?: { data?: { detail?: unknown } }; message?: string };
+        const msg = formatApiError(ax.response?.data?.detail) || ax.message || 'сеть или сервер недоступны';
+        setError(`Ошибка парсинга файла (шаг 1): ${msg}`);
+        return;
+      }
 
-      // Шаг 2: Скоринг
+      // Шаг 2: скоринг через LLM (Ollama / Gemini / и т.д.)
       setIsScoringPhase(true);
-      const scoreData = await api.scoreMarkdown(parseData.markdown, parseData.filename);
-
-      onScoreComplete(scoreData);
-    } catch (err: any) {
-      if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
-      } else {
-        setError(err.message || 'Произошла неизвестная ошибка при загрузке и анализе.');
+      try {
+        const scoreData = await api.scoreMarkdown(parseData.markdown, parseData.filename);
+        const payload: AuditPayload = { result: scoreData, filename: parseData.filename };
+        onScoreComplete(payload);
+        if (getAuthToken()) {
+          try {
+            await api.saveAnalysis(payload);
+          } catch {
+            /* сохранение в историю не критично */
+          }
+        }
+      } catch (err: unknown) {
+        const ax = err as { response?: { data?: { detail?: unknown } }; message?: string };
+        const msg = formatApiError(ax.response?.data?.detail) || ax.message || 'сеть или сервер недоступны';
+        setError(`Ошибка ИИ-скоринга (шаг 2): ${msg}`);
       }
     } finally {
       setIsLoading(false);

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
-import { TCriterion } from '../types';
+import type { TCriterion } from '../types';
 
 interface CriteriaRadarProps {
   criteria: TCriterion[];

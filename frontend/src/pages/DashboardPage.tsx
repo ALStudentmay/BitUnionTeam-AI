@@ -1,17 +1,22 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { ArrowLeft, AlertTriangle, CheckCircle, FileCheck, Layers, Sparkles, Download } from 'lucide-react';
-import { TZAuditResult } from '../types';
+import { ArrowLeft, AlertTriangle, CheckCircle, FileCheck, FileDown, Layers, Sparkles, Download } from 'lucide-react';
+import type { TZAuditResult } from '../types';
 import { ScoreGauge } from '../components/ScoreGauge';
 import { CriteriaRadar } from '../components/CriteriaRadar';
+import { ChatPanel } from '../components/ChatPanel';
+import { buildChatContext } from '../utils/chatContext';
+import { api } from '../api';
 
 interface DashboardPageProps {
   result: TZAuditResult;
+  filename: string;
   onReset: () => void;
 }
 
-export const DashboardPage: React.FC<DashboardPageProps> = ({ result, onReset }) => {
+export const DashboardPage: React.FC<DashboardPageProps> = ({ result, filename, onReset }) => {
   const [activeTab, setActiveTab] = useState<'criteria' | 'errors' | 'improvements'>('criteria');
+  const [reportLoading, setReportLoading] = useState(false);
 
   // Определяем цвет градиента для верхней панели в зависимости от оценки
   let gradientBanner = 'from-red-500 to-rose-600';
@@ -23,9 +28,23 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ result, onReset })
     const file = new Blob([result.improved_markdown], { type: 'text/markdown' });
     element.href = URL.createObjectURL(file);
     element.download = "Улучшенное_ТЗ.md";
-    document.body.appendChild(element); // Required for this to work in FireFox
+    document.body.appendChild(element);
     element.click();
     document.body.removeChild(element);
+  };
+
+  const handleDownloadFullReport = async () => {
+    setReportLoading(true);
+    try {
+      const md = await api.buildReportMarkdown(filename, result);
+      const safe = filename.replace(/[^\w.\-]/g, '_').slice(0, 60);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown;charset=utf-8' }));
+      a.download = `Итоговый_отчёт_${safe}.md`;
+      a.click();
+    } finally {
+      setReportLoading(false);
+    }
   };
 
   return (
@@ -48,6 +67,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ result, onReset })
             Нейросеть проанализировала ваше Техническое Задание по 7 системным критериям. 
             Исправьте критические ошибки для повышения шансов на одобрение.
           </p>
+          <p className="text-white/60 text-sm mt-2 truncate max-w-xl" title={filename}>
+            Документ: {filename}
+          </p>
           <div className="mt-6 inline-flex items-center bg-white/20 px-4 py-2 rounded-full backdrop-blur-md">
             <span className="font-semibold mr-2">Оценка:</span>
             <span className="text-2xl font-black">{result.grade}</span>
@@ -58,7 +80,19 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ result, onReset })
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-12">
+      <div className="flex flex-wrap gap-3 mb-6">
+        <button
+          type="button"
+          onClick={handleDownloadFullReport}
+          disabled={reportLoading}
+          className="inline-flex items-center gap-2 bg-white border border-slate-300 text-slate-800 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50 disabled:opacity-50 shadow-sm"
+        >
+          <FileDown className="w-4 h-4" />
+          {reportLoading ? 'Формирование…' : 'Скачать итоговый отчёт (.md)'}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-8 mb-12">
         {/* Radar Chart */}
         <div className="col-span-1 lg:col-span-1 bg-white rounded-2xl p-6 border border-slate-100 shadow-sm">
           <h3 className="text-xl font-bold flex items-center text-slate-800 mb-6">
@@ -69,7 +103,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ result, onReset })
         </div>
 
         {/* Info & Strengths tabs */}
-        <div className="col-span-1 lg:col-span-2 bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden flex flex-col">
+        <div className="col-span-1 lg:col-span-2 bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden flex flex-col min-h-[400px]">
           <div className="flex border-b border-slate-100 bg-slate-50/50">
             <button 
               onClick={() => setActiveTab('criteria')}
@@ -184,6 +218,11 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ result, onReset })
               </div>
             )}
           </div>
+        </div>
+
+        {/* AI Chat */}
+        <div className="col-span-1 lg:col-span-1">
+          <ChatPanel tzContext={buildChatContext(result)} />
         </div>
       </div>
     </div>

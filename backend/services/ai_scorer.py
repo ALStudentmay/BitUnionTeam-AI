@@ -4,7 +4,8 @@ AI Scorer Service — ЯДРО СИСТЕМЫ
 Принимает Markdown-текст ТЗ и запускает LLM-оценку.
 
 Поддерживаемые провайдеры (через .env LLM_PROVIDER):
-  - gemini    (Google Gemini 1.5 Pro)
+  - groq      (Groq API через OpenAI SDK)
+  - gemini    (Google Gemini)
   - ollama    (локально, Qwen 2.5 или любая другая)
   - openai    (GPT-4o)
   - anthropic (Claude 3.5 Sonnet)
@@ -13,6 +14,7 @@ AI Scorer Service — ЯДРО СИСТЕМЫ
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -273,12 +275,49 @@ USER_PROMPT_TEMPLATE = """
 #  3. LLM АДАПТЕРЫ (стратегия — выбирается через .env)
 # ══════════════════════════════════════════════════════════════════
 
+def _gemini_retry_delay_seconds(exc: BaseException) -> float:
+    """Достаёт рекомендованную задержку из ответа 429 (секунды + небольшой запас)."""
+    text = str(exc)
+    m = re.search(r"seconds[:\s]+(\d+)", text, re.I)
+    if m:
+        return float(m.group(1)) + 3.0
+    m2 = re.search(r"retry in ([\d.]+)s", text, re.I)
+    if m2:
+        return float(m2.group(1)) + 3.0
+    return 45.0
+
+
+def _is_gemini_rate_limit(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return (
+        "429" in s
+        or "resource exhausted" in s
+        or "quota" in s
+        or "rate limit" in s
+        or "too many requests" in s
+    )
+
+
 async def _call_gemini(system_prompt: str, user_prompt: str) -> str:
-    """Вызов Google Gemini API (gemini-1.5-pro) с JSON mode."""
+    """Вызов Google Gemini API с JSON mode.
+
+    Идентификаторы моделей меняются (см. https://ai.google.dev/gemini-api/docs/models).
+    Старые имена вроде gemini-1.5-pro дают 404 — по умолчанию используем актуальную flash-модель.
+
+    При 429 (квота / лимит RPM) делает несколько повторов с паузой — см. GEMINI_MAX_RETRIES.
+    """
     import google.generativeai as genai
 
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-    model_name = os.getenv("GOOGLE_MODEL", "gemini-1.5-pro")
+    api_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError(
+            "GOOGLE_API_KEY не задан. Создайте backend/.env с ключом из "
+            "https://aistudio.google.com/apikey и перезапустите сервер из папки backend "
+            "или убедитесь, что .env загружается (см. load_dotenv в main.py)."
+        )
+
+    genai.configure(api_key=api_key)
+    model_name = (os.getenv("GOOGLE_MODEL") or "gemini-2.0-flash").strip()
 
     model = genai.GenerativeModel(
         model_name=model_name,
@@ -289,8 +328,36 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> str:
         }
     )
 
-    response = await model.generate_content_async(user_prompt)
-    return response.text
+    max_retries = max(1, int(os.getenv("GEMINI_MAX_RETRIES", "4")))
+    last_exc: BaseException | None = None
+
+    for attempt in range(max_retries):
+        try:
+            response = await model.generate_content_async(user_prompt)
+            return response.text
+        except Exception as e:
+            last_exc = e
+            if not _is_gemini_rate_limit(e) or attempt >= max_retries - 1:
+                break
+            delay = _gemini_retry_delay_seconds(e)
+            logger.warning(
+                "Gemini вернул лимит квоты (429), пауза %.1f с перед повтором (%s/%s)",
+                delay,
+                attempt + 1,
+                max_retries,
+            )
+            await asyncio.sleep(delay)
+
+    assert last_exc is not None
+    if _is_gemini_rate_limit(last_exc):
+        raise ValueError(
+            "Квота Google Gemini исчерпана (лимит бесплатного тарифа или слишком много запросов). "
+            "Варианты: подождать 1–2 минуты и повторить; сменить модель на более лёгкую в .env "
+            "(например gemini-2.5-flash-lite); подключить оплату в Google AI Studio; "
+            "или переключить LLM_PROVIDER=ollama для локальной модели. "
+            f"Подробности: {last_exc}"
+        ) from last_exc
+    raise last_exc
 
 
 async def _call_ollama(prompt: str) -> str:
@@ -340,6 +407,32 @@ async def _call_openai(prompt: str) -> str:
     return response.choices[0].message.content
 
 
+async def _call_groq(prompt: str) -> str:
+    """Вызов Groq API через OpenAI-compatible клиент."""
+    from openai import AsyncOpenAI
+
+    api_key = (os.getenv("GROQ_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("GROQ_API_KEY не задан в backend/.env")
+
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1",
+    )
+    model = (os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip()
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.1,
+        max_tokens=4096,
+    )
+    return response.choices[0].message.content
+
+
 async def _call_anthropic(prompt: str) -> str:
     """Вызов Anthropic Claude API."""
     import anthropic
@@ -369,13 +462,17 @@ async def score_tz(tz_markdown: str) -> TZAuditResult:
     Возвращает:
         TZAuditResult — строго типизированный результат аудита
     """
-    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
+    provider = os.getenv("LLM_PROVIDER", "groq").lower()
     logger.info(f"Запуск скоринга через провайдер: {provider}")
 
-    user_prompt = USER_PROMPT_TEMPLATE.format(tz_markdown=tz_markdown[:12000])  # обрезаем для экономии токенов
+    # Короче текст — меньше токенов и ниже шанс упереться в дневной лимит free tier (см. TZ_SCORE_MAX_CHARS)
+    _max_chars = int(os.getenv("TZ_SCORE_MAX_CHARS", "8000"))
+    user_prompt = USER_PROMPT_TEMPLATE.format(tz_markdown=tz_markdown[:_max_chars])
 
     # Выбор провайдера
-    if provider == "openai":
+    if provider == "groq":
+        raw_json = await _call_groq(user_prompt)
+    elif provider == "openai":
         raw_json = await _call_openai(user_prompt)
     elif provider == "anthropic":
         raw_json = await _call_anthropic(user_prompt)

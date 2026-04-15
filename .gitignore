@@ -45,3 +45,6 @@ Thumbs.db
 backend/.env
 *.pem
 *.key
+
+# SQLite
+backend/data/*.db
